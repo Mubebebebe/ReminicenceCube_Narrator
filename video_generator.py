@@ -34,7 +34,6 @@ def create_subtitle_clip(text, font_path, font_size=40):
     w, h = bbox[2] + 20, bbox[3] + 20
     img = Image.new("RGBA", (w, h), (0,0,0,0))
     draw = ImageDraw.Draw(img)
-    # 背景の黒い縁取り（視認性向上）
     draw.multiline_text((10,10), wrapped, font=font, fill="white", stroke_width=2, stroke_fill="black", align="center")
     return ImageClip(np.array(img))
 
@@ -60,8 +59,7 @@ def generate_video(image_path, actions, audio_infos, img_info, global_clips):
     segments = []
     font_path = get_font_path()
     
-    # 最初のカメラ状態（全体表示）
-    prev_cam = (0.5, 0.5, 1.0, 1.0) # cx, cy, w, h (相対)
+    prev_cam = (0.5, 0.5, 1.0, 1.0) 
 
     for i, act_step in enumerate(actions):
         v_act = act_step.get("visual_action", {})
@@ -69,16 +67,12 @@ def generate_video(image_path, actions, audio_infos, img_info, global_clips):
         
         duration = max(aud_dur, v_act.get("duration", 5))
         loc = v_act.get("location", {"x":0, "y":0, "w":1, "h":1})
-        
-        # ターゲットカメラ状態
         target_cam = (loc['x'] + loc['w']/2, loc['y'] + loc['h']/2, loc['w'], loc['h'])
 
         def make_frame(t, start=prev_cam, end=target_cam, d=duration):
-            # サインカーブによる滑らかな移動
             prog = (np.sin((t / d - 0.5) * np.pi) + 1) / 2
             curr = [s * (1 - prog) + e * prog for s, e in zip(start, end)]
             
-            # クロップ座標（ピクセル）
             im_w, im_h = base_img.size
             cx, cy, cw, ch = curr
             x1 = max(0, int((cx - cw/2) * im_w))
@@ -86,7 +80,6 @@ def generate_video(image_path, actions, audio_infos, img_info, global_clips):
             x2 = min(im_w, int(x1 + cw * im_w))
             y2 = min(im_h, int(y1 + ch * im_h))
             
-            # 画像が小さすぎないかチェック
             if x2 <= x1: x2 = x1 + 1
             if y2 <= y1: y2 = y1 + 1
             
@@ -95,13 +88,11 @@ def generate_video(image_path, actions, audio_infos, img_info, global_clips):
 
         scene = VideoClip(make_frame, duration=duration)
         
-        # 音声
         if aud_path:
             audio = AudioFileClip(aud_path).with_duration(aud_dur)
             global_clips.append(audio)
             scene = scene.with_audio(audio)
         
-        # 字幕
         sub_clips = []
         for ts in timestamps:
             sub = create_subtitle_clip(ts['text'], font_path)

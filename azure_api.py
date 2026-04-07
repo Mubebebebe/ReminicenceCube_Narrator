@@ -41,12 +41,13 @@ def load_whisper_model():
     global whisper_model
     if whisper_model is None and whisper is not None:
         try:
-            whisper_model = whisper.load_model("base") # 速度優先
+            whisper_model = whisper.load_model("base") 
             return True
         except: return False
     return whisper_model is not None
 
 def analyze_image(image_path):
+    """画像の解像度を取得します"""
     try:
         with Image.open(image_path) as img:
             w, h = img.size
@@ -54,13 +55,13 @@ def analyze_image(image_path):
     except: return None
 
 def generate_narration_and_actions(image_analysis, cube_data_list):
+    """回想法キューブのデータを元に、AIが物語とズーム位置を再構成します"""
     client = AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_key=AZURE_OPENAI_KEY,
         api_version=AZURE_OPENAI_API_VERSION
     )
 
-    # 渡されたキューブ各面の情報をテキスト化
     materials = []
     for i, item in enumerate(cube_data_list):
         face = item.get("face", "不明")
@@ -72,11 +73,11 @@ def generate_narration_and_actions(image_analysis, cube_data_list):
     あなたは感動的なドキュメンタリーを作る映像ディレクターです。
     提供された「回想法キューブ」の語り素材を自由に並び替え、一枚の写真から物語を再構成してください。
 
-    # 素材リスト (start/endは無視して文脈で再構成してください)
+    # 素材リスト (録音順序は無視して文脈で再構築してください)
     {chr(10).join(materials)}
 
     # 指示
-    1. 語り(transcript)の内容を深く読み解き、その裏にある感情を汲み取った「ナレーション」を新たに作成してください。
+    1. 語り(transcript)の内容を深く解釈し、その裏にある感情を汲み取った「ナレーション」を新たに作成してください。
     2. ナレーションは穏やかな敬語（三人称）とし、写真の持ち主を尊重した表現にしてください。
     3. 各シーンには、対応する素材の座標(location)を割り当てて、ズーム効果を指定してください。
     4. 全体で約60秒、シーン数は5〜7つに調整してください。最初のシーンは必ず写真全体(Front)から始めてください。
@@ -107,6 +108,7 @@ def generate_narration_and_actions(image_analysis, cube_data_list):
     except: return None
 
 def synthesize_speech_and_get_timestamps(text, output_base):
+    """ナレーション音声を合成し、Whisperで字幕用の秒数を取得します"""
     output_file = f"{output_base}.wav"
     try:
         sc = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
@@ -120,7 +122,6 @@ def synthesize_speech_and_get_timestamps(text, output_base):
             with AudioFileClip(output_file) as clip:
                 dur = clip.duration
         
-        # 字幕タイミング (Whisper)
         load_whisper_model()
         ts = []
         if whisper_model:
