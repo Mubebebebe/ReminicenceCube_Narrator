@@ -1,0 +1,38 @@
+# --- Python Virtual Environment ---
+# これまでのエラーの原因。仮想環境は追跡しない
+.venv/
+venv/
+env/
+ENV/
+*.pyenv.*
+
+# --- Environment Variables File ---
+# APIキーなどの機密情報を含む可能性があるため追跡しない
+.env
+
+# --- Python Bytecode and Cache ---
+# 実行時に自動生成されるファイル
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Distribution / Packaging ---
+# パッケージ作成時に生成されるディレクトリ
+build/
+dist/
+*.egg-info/
+*.egg
+
+# --- IDE / Editor Files ---
+# VSCode, PyCharmなどの設定ファイル (プロジェクト共通設定以外は除外推奨)
+.vscode/
+.idea/
+
+# --- OS Generated Files ---
+# macOSやWindowsが自動生成するファイル
+.DS_Store
+Thumbs.db
+
+# --- Log Files ---
+# ログファイル (必要に応じてパターンを追加)
+*.log
