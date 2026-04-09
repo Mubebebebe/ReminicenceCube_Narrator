@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import re
+import base64
 from dotenv import load_dotenv
 from html import escape
 from PIL import Image
@@ -25,7 +26,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 load_dotenv()
 
-# 環境変数の取得
 AZURE_VISION_ENDPOINT = os.environ.get("AZURE_VISION_ENDPOINT")
 AZURE_VISION_KEY = os.environ.get("AZURE_VISION_KEY")
 AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
@@ -41,75 +41,62 @@ def load_whisper_model():
     global whisper_model
     if whisper_model is None and whisper is not None:
         try:
-            whisper_model = whisper.load_model("base") 
+            whisper_model = whisper.load_model("base")
             return True
-        except: return False
+        except Exception as e:
+            logger.error(f"Whisperロード失敗: {e}")
+            return False
     return whisper_model is not None
 
+def encode_image_to_base64(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+
 def analyze_image(image_path):
-    """画像の解像度を取得します"""
     try:
         with Image.open(image_path) as img:
             w, h = img.size
         return {'width': w, 'height': h}
     except: return None
 
-def generate_narration_and_actions(image_analysis, cube_data_list):
-    """回想法キューブのデータを元に、AIが物語とズーム位置を再構成します"""
+def generate_narration_and_actions(image_path, cube_data_list, is_final_photo=False):
     client = AzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_key=AZURE_OPENAI_KEY,
         api_version=AZURE_OPENAI_API_VERSION
     )
 
-    materials = []
-    for i, item in enumerate(cube_data_list):
-        face = item.get("face", "不明")
-        text = item.get("transcript", "")
-        loc = item.get("location", {"x":0, "y":0, "w":1, "h":1})
-        materials.append(f"素材{i}: [面={face}] 語り='{text}' 座標={loc}")
+    base64_image = encode_image_to_base64(image_path)
+
+    if is_final_photo:
+        context = """# 最終シーンの指示: 感動的な余韻を残して締めくくってください。"""
+    else:
+        context = """# 次の画像への移行ルール: 最後にナレーションなしの全景（x:0,y:0,w:1,h:1）を2秒追加してください。そのシーンのnarrationは空文字にします。"""
+
+    materials = [f"素材{i}: [面={it.get('face')}] 語り='{it.get('transcript')}' 座標={it.get('location')}" for i, it in enumerate(cube_data_list)]
 
     prompt = f"""
-    あなたは感動的なドキュメンタリーを作る映像ディレクターです。
-    提供された「回想法キューブ」の語り素材を自由に並び替え、一枚の写真から物語を再構成してください。
-
-    # 素材リスト (録音順序は無視して文脈で再構築してください)
+    あなたは熟練のドキュメンタリー作家です。写真と文字起こし（transcript）を照合してください。
+    文字起こしの誤字を写真の内容から推測して補正し、感動的なナレーションを新たに作成してください。
+    一人称は使わず、敬語の三人称で構成します。全体約60秒、5-7シーンで構成。
     {chr(10).join(materials)}
-
-    # 指示
-    1. 語り(transcript)の内容を深く解釈し、その裏にある感情を汲み取った「ナレーション」を新たに作成してください。
-    2. ナレーションは穏やかな敬語（三人称）とし、写真の持ち主を尊重した表現にしてください。
-    3. 各シーンには、対応する素材の座標(location)を割り当てて、ズーム効果を指定してください。
-    4. 全体で約60秒、シーン数は5〜7つに調整してください。最初のシーンは必ず写真全体(Front)から始めてください。
-    5. transcriptには誤字が多く含まれているので写真の内容と文脈を解釈して適当に補完してください。
-
-    # 出力形式 (JSON配列のみ)
-    [
-      {{
-        "narration": "...",
-        "visual_action": {{ "duration": 8, "location": {{"x":0, "y":0, "w":1, "h":1}} }}
-      }},
-      ...
-    ]
+    {context}
+    出力はJSON配列のみ。
     """
 
-    response = client.chat.completions.create(
-        model=AZURE_OPENAI_DEPLOYMENT_NAME,
-        messages=[
-            {"role": "system", "content": "あなたは映像編集のプロです。JSON配列のみを出力します。"},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.7
-    )
-
     try:
-        content = response.choices[0].message.content
-        content = re.sub(r'```json\s*|\s*```', '', content).strip()
+        response = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": "あなたは優秀な映像ディレクターです。JSONのみ返します。"},
+                {"role": "user", "content": [{"type":"text", "text":prompt}, {"type":"image_url", "image_url":{"url":f"data:image/jpeg;base64,{base64_image}"}}]}
+            ]
+        )
+        content = re.sub(r'```json\s*|\s*```', '', response.choices[0].message.content).strip()
         return json.loads(content)
     except: return None
 
 def synthesize_speech_and_get_timestamps(text, output_base):
-    """ナレーション音声を合成し、Whisperで字幕用の秒数を取得します"""
     output_file = f"{output_base}.wav"
     try:
         sc = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
@@ -120,15 +107,38 @@ def synthesize_speech_and_get_timestamps(text, output_base):
         res = synthesizer.speak_text_async(text).get()
         dur = 0.0
         if res.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-            with AudioFileClip(output_file) as clip:
-                dur = clip.duration
+            with AudioFileClip(output_file) as clip: dur = clip.duration
         
         load_whisper_model()
-        ts = []
+        sentence_timestamps = []
         if whisper_model:
             w_res = whisper_model.transcribe(output_file, language="ja")
-            for seg in w_res.get("segments", []):
-                ts.append({'text': seg['text'], 'offset_seconds': seg['start'], 'duration_seconds': seg['end']-seg['start']})
-        
-        return output_file, dur, ts
-    except: return None, 0.0, []
+            segments = w_res.get("segments", [])
+            clean_text = text.strip()
+            total_whisper_chars = sum(len(s.get("text", "").strip()) for s in segments)
+            
+            if total_whisper_chars > 0:
+                current_ptr = 0
+                for i, seg in enumerate(segments):
+                    seg_whisper_text = seg.get("text", "").strip()
+                    if not seg_whisper_text: continue
+                    ratio = len(seg_whisper_text) / total_whisper_chars
+                    slice_len = int(len(clean_text) * ratio)
+                    if i == len(segments) - 1:
+                        sub_text = clean_text[current_ptr:]
+                    else:
+                        sub_text = clean_text[current_ptr : current_ptr + slice_len]
+                    current_ptr += slice_len
+                    if sub_text:
+                        sentence_timestamps.append({
+                            'text': sub_text,
+                            'offset_seconds': seg['start'],
+                            'duration_seconds': seg['end'] - seg['start']
+                        })
+            else:
+                sentence_timestamps.append({'text': clean_text, 'offset_seconds': 0.0, 'duration_seconds': dur})
+
+        return output_file, dur, sentence_timestamps
+    except Exception as e:
+        logger.error(f"音声合成エラー: {e}")
+        return None, 0.0, []
