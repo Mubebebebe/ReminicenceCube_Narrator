@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QFileDialog, QMessageBox, QListWidget, QCheckBox
 )
-from PySide6.QtCore import Slot, QThread, Qt
+from PySide6.QtCore import Slot, QThread
 from worker import GenerationWorker
 
 class MainWindow(QMainWindow):
@@ -11,124 +11,115 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("回想法キューブ ビデオ生成")
         self.setGeometry(100, 100, 850, 650)
-        self.parts = []
+        self.input_parts = []
         self.bgm_path = ""
-        self._ui()
+        self._setup_ui()
 
-    def _ui(self):
+    def _setup_ui(self):
         w = QWidget()
         self.setCentralWidget(w)
-        l = QVBoxLayout(w)
+        layout = QVBoxLayout(w)
 
-        # モダンなデザインの適用
         self.setStyleSheet("""
             QMainWindow { background-color: #f0f2f5; }
             QWidget { font-family: 'Segoe UI', 'Meiryo'; font-size: 10pt; }
             QListWidget { background-color: white; border: 1px solid #dcdfe6; border-radius: 8px; padding: 5px; }
-            QPushButton { 
-                background-color: #0078d4; color: white; border: none; 
-                border-radius: 6px; padding: 8px 16px; font-weight: bold; 
-            }
+            QPushButton { background-color: #0078d4; color: white; border-radius: 6px; padding: 10px; font-weight: bold; border: none; }
             QPushButton:hover { background-color: #106ebe; }
             QPushButton#secondary { background-color: #606266; }
-            QPushButton#secondary:hover { background-color: #303133; }
-            QCheckBox { spacing: 8px; }
-            QLabel#status { background-color: #ffffff; border: 1px solid #dcdfe6; border-radius: 4px; padding: 8px; color: #303133; }
+            QLabel#status { background-color: #ffffff; border: 1px solid #dcdfe6; padding: 10px; border-radius: 4px; color: #333; }
         """)
 
-        l.addWidget(QLabel("1. 画像と回想法データ（JSON）のセット"))
-        self.lv = QListWidget()
-        l.addWidget(self.lv)
+        layout.addWidget(QLabel("画像とJSONファイルを追加してください:"))
+        self.parts_list = QListWidget()
+        layout.addWidget(self.parts_list)
         
-        row_list = QHBoxLayout()
-        b_img = QPushButton("画像を追加")
-        b_img.clicked.connect(self.add_i)
-        row_list.addWidget(b_img)
+        btns = QHBoxLayout()
+        add_img_btn = QPushButton("画像を追加...")
+        add_img_btn.clicked.connect(self.add_image)
+        btns.addWidget(add_img_btn)
 
-        b_jsn = QPushButton("JSONを紐付け")
-        b_jsn.setObjectName("secondary")
-        b_jsn.clicked.connect(self.set_j)
-        row_list.addWidget(b_jsn)
+        set_json_btn = QPushButton("JSONファイルを選択...")
+        set_json_btn.setObjectName("secondary")
+        set_json_btn.clicked.connect(self.select_json)
+        btns.addWidget(set_json_btn)
 
-        b_del = QPushButton("削除")
-        b_del.setObjectName("secondary")
-        b_del.clicked.connect(self.rem_i)
-        row_list.addWidget(b_del)
-        l.addLayout(row_list)
+        del_btn = QPushButton("削除")
+        del_btn.setObjectName("secondary")
+        del_btn.clicked.connect(self.remove_part)
+        btns.addWidget(del_btn)
+        layout.addLayout(btns)
 
-        # BGM設定セクション
-        l.addSpacing(10)
-        l.addWidget(QLabel("2. 音楽（BGM）の設定"))
-        bgm_box = QHBoxLayout()
-        self.cb_bgm = QCheckBox("BGMを挿入する")
-        bgm_box.addWidget(self.cb_bgm)
+        layout.addSpacing(10)
+        layout.addWidget(QLabel("音声・BGM設定:"))
+        bgm_row = QHBoxLayout()
+        self.bgm_cb = QCheckBox("BGMを挿入する")
+        bgm_row.addWidget(self.bgm_cb)
         
-        b_bgm = QPushButton("BGMファイルを選択...")
-        b_bgm.setObjectName("secondary")
-        b_bgm.clicked.connect(self.sel_bgm)
-        bgm_box.addWidget(b_bgm)
+        sel_bgm_btn = QPushButton("BGMを選択...")
+        sel_bgm_btn.setObjectName("secondary")
+        sel_bgm_btn.clicked.connect(self.select_bgm)
+        bgm_row.addWidget(sel_bgm_btn)
         
-        self.lbl_bgm = QLabel("未選択")
-        self.lbl_bgm.setStyleSheet("color: #909399;")
-        bgm_box.addWidget(self.lbl_bgm, 1)
-        l.addLayout(bgm_box)
+        self.bgm_label = QLabel("未選択")
+        self.bgm_label.setStyleSheet("color: #909399;")
+        bgm_row.addWidget(self.bgm_label, 1)
+        layout.addLayout(bgm_row)
 
-        l.addSpacing(20)
-        self.b_gen = QPushButton("動画を生成")
-        self.b_gen.setMinimumHeight(50)
-        self.b_gen.clicked.connect(self.start)
-        l.addWidget(self.b_gen)
+        layout.addSpacing(20)
+        self.gen_btn = QPushButton("動画を生成")
+        self.gen_btn.setFixedHeight(50)
+        self.gen_btn.clicked.connect(self.start_process)
+        layout.addWidget(self.gen_btn)
 
-        self.st = QLabel("待機中")
-        self.st.setObjectName("status")
-        l.addWidget(self.st)
+        self.status_label = QLabel("待機中")
+        self.status_label.setObjectName("status")
+        layout.addWidget(self.status_label)
 
-    def add_i(self):
-        fs, _ = QFileDialog.getOpenFileNames(self, "画像", "", "Images (*.png *.jpg *.jpeg)")
-        for f in fs: self.parts.append({"image_path": f, "json_path": ""})
-        self.upd()
+    def add_image(self):
+        fs, _ = QFileDialog.getOpenFileNames(self, "画像を選択", "", "Images (*.jpg *.jpeg *.png)")
+        for f in fs: self.input_parts.append({"image_path": f, "json_path": ""})
+        self.update_list()
 
-    def set_j(self):
-        idx = self.lv.currentRow()
-        if idx < 0: return
-        f, _ = QFileDialog.getOpenFileName(self, "JSON選択", "", "JSON (*.json)")
-        if f: self.parts[idx]["json_path"] = f
-        self.upd()
+    def select_json(self):
+        row = self.parts_list.currentRow()
+        if row < 0: return
+        f, _ = QFileDialog.getOpenFileName(self, "JSONを選択", "", "JSON (*.json)")
+        if f: 
+            self.input_parts[row]["json_path"] = f
+            self.update_list()
 
-    def rem_i(self):
-        idx = self.lv.currentRow()
-        if 0 <= idx < len(self.parts): self.parts.pop(idx)
-        self.upd()
+    def remove_part(self):
+        row = self.parts_list.currentRow()
+        if 0 <= row < len(self.input_parts): self.input_parts.pop(row)
+        self.update_list()
 
-    def sel_bgm(self):
-        f, _ = QFileDialog.getOpenFileName(self, "BGM選択", "", "Audio (*.mp3 *.wav *.m4a)")
-        if f:
+    def select_bgm(self):
+        f, _ = QFileDialog.getOpenFileName(self, "BGMを選択", "", "Audio (*.mp3 *.wav)")
+        if f: 
             self.bgm_path = f
-            self.lbl_bgm.setText(os.path.basename(f))
-            self.cb_bgm.setChecked(True)
+            self.bgm_label.setText(os.path.basename(f))
+            self.bgm_cb.setChecked(True)
 
-    def upd(self):
-        self.lv.clear()
-        for p in self.parts:
-            img = os.path.basename(p['image_path'])
-            jsn = os.path.basename(p['json_path']) if p['json_path'] else "(JSON未選択)"
-            self.lv.addItem(f"画像: {img} / データ: {jsn}")
+    def update_list(self):
+        self.parts_list.clear()
+        for p in self.input_parts:
+            self.parts_list.addItem(f"画像: {os.path.basename(p['image_path'])} / データ: {os.path.basename(p['json_path']) if p['json_path'] else '未選択'}")
 
-    def start(self):
-        if not self.parts: return
-        self.b_gen.setEnabled(False)
-        self.th = QThread()
-        self.wk = GenerationWorker(self.parts, self.cb_bgm.isChecked(), self.bgm_path)
-        self.wk.moveToThread(self.th)
-        self.wk.signals.status_update.connect(self.st.setText)
-        self.wk.signals.finished.connect(lambda m: self.end(m, True))
-        self.wk.signals.error.connect(lambda m: self.end(m, False))
-        self.th.started.connect(self.wk.run)
-        self.th.start()
+    def start_process(self):
+        if not self.input_parts: return
+        self.gen_btn.setEnabled(False)
+        self.thread = QThread()
+        self.worker = GenerationWorker(self.input_parts, self.bgm_cb.isChecked(), self.bgm_path)
+        self.worker.moveToThread(self.thread)
+        self.worker.signals.status_update.connect(self.status_label.setText)
+        self.worker.signals.finished.connect(self.on_done)
+        self.worker.signals.error.connect(self.on_done)
+        self.thread.started.connect(self.worker.run)
+        self.thread.start()
 
-    def end(self, m, ok):
-        self.b_gen.setEnabled(True)
-        if ok: QMessageBox.information(self, "完了", m)
-        else: QMessageBox.critical(self, "エラー", m)
-        self.th.quit()
-        self.th.wait()
+    def on_done(self, msg):
+        self.gen_btn.setEnabled(True)
+        QMessageBox.information(self, "完了", msg)
+        self.thread.quit()
+        self.thread.wait()

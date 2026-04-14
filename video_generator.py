@@ -7,69 +7,104 @@ import textwrap
 from moviepy import ImageClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips, VideoClip
 
 logger = logging.getLogger(__name__)
-OUTPUT_WIDTH, OUTPUT_HEIGHT, OUTPUT_FPS = 1280, 720, 24
 
-def get_font():
-    paths = ['C:/Windows/Fonts/YuGothM.ttc', 'MS Gothic', 'Arial']
-    for p in paths:
+# --- 定数定義 ---
+OUTPUT_WIDTH = 1280
+OUTPUT_HEIGHT = 720
+OUTPUT_FPS = 24
+SUBTITLE_FONT_SIZE = 42
+# ズーム速度を向上させるための遷移時間（2秒）
+TRANSITION_DURATION = 2.0
+
+def get_font_path():
+    candidates = ['C:/Windows/Fonts/YuGothM.ttc', 'MS Gothic', 'Arial']
+    for p in candidates:
         if os.path.exists(p): return p
     return "Arial"
 
-def create_sub(text, font_p):
-    try: font = ImageFont.truetype(font_p, 40)
+def create_subtitle_clip(text, font_path, font_size, max_width):
+    try: font = ImageFont.truetype(font_path, font_size)
     except: font = ImageFont.load_default()
-    wrapped = "\n".join(textwrap.wrap(text, width=30))
-    dummy = Image.new("RGB", (1,1))
-    draw = ImageDraw.Draw(dummy)
-    bbox = draw.multiline_textbbox((0,0), wrapped, font=font)
-    img = Image.new("RGBA", (bbox[2]+20, bbox[3]+20), (0,0,0,0))
-    ImageDraw.Draw(img).multiline_text((10,10), wrapped, font=font, fill="white", stroke_width=2, stroke_fill="black", align="center")
+    
+    avg_char_w = font.getlength("あ")
+    chars_per_line = max(1, int(max_width / avg_char_w))
+    wrapped_text = "\n".join(textwrap.wrap(text, width=chars_per_line))
+
+    dummy_draw = ImageDraw.Draw(Image.new("RGB", (1,1)))
+    bbox = dummy_draw.multiline_textbbox((0, 0), wrapped_text, font=font, spacing=6)
+    w, h = bbox[2] - bbox[0] + 30, bbox[3] - bbox[1] + 30
+    
+    img = Image.new("RGBA", (int(w), int(h)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    for dx, dy in [(-2,-2), (2,-2), (-2,2), (2,2)]:
+        draw.multiline_text((15+dx, 15+dy), wrapped_text, font=font, fill="black", align="center", spacing=6)
+    draw.multiline_text((15, 15), wrapped_text, font=font, fill="white", align="center", spacing=6)
     return ImageClip(np.array(img))
 
-def res_pad(img, size=(OUTPUT_WIDTH, OUTPUT_HEIGHT)):
-    tw, th = size
-    img_aspect = img.width / img.height
+def resize_with_padding(pil_img, target_size):
+    tw, th = target_size
+    img_aspect = pil_img.width / pil_img.height
     if img_aspect > (tw/th): nw, nh = tw, int(tw/img_aspect)
-    else: nw, nh = int(th*img_aspect), th
-    res = img.resize((nw, nh), Image.LANCZOS)
-    canvas = Image.new('RGB', size, (0,0,0))
-    canvas.paste(res, ((tw-nw)//2, (th-nh)//2))
-    return canvas
+    else: nh, nw = th, int(th*img_aspect)
+    resized = pil_img.resize((nw, nh), Image.Resampling.LANCZOS)
+    bg = Image.new('RGB', target_size, (0, 0, 0))
+    bg.paste(resized, ((tw - nw) // 2, (th - nh) // 2))
+    return bg
 
-def generate_video(image_path, actions, audio_infos, img_info, global_clips):
-    base = Image.open(image_path).convert("RGB")
-    segments = []
-    font_p = get_font()
-    curr_cam = (0.5, 0.5, 1.0, 1.0)
+def generate_video(image_path, actions, audio_infos, _, image_analysis, global_clips, narration_enabled, visual_effects_enabled=True):
+    output_size = (OUTPUT_WIDTH, OUTPUT_HEIGHT)
+    font_path = get_font_path()
+    base_image = Image.open(image_path).convert("RGB")
+    video_segments = []
+    prev_cam = (0.5, 0.5, 1.0, 1.0) # cx, cy, w, h
 
-    for i, step in enumerate(actions):
-        vis = step.get("visual_action", {})
-        a_path, a_dur, a_ts = audio_infos[i]
-        dur = max(a_dur, vis.get("duration", 5))
-        loc = vis.get("location", {"x":0, "y":0, "w":1, "h":1})
-        tgt_cam = (loc['x']+loc['w']/2, loc['y']+loc['h']/2, loc['w'], loc['h'])
+    for i, (audio_info, action_step) in enumerate(zip(audio_infos, actions)):
+        audio_path, aud_dur, timestamps = audio_info
+        act = action_step.get('visual_action', {})
+        video_dur = max(aud_dur, act.get('duration', 2))
+        
+        loc = act.get('location', {'x':0, 'y':0, 'w':1, 'h':1})
+        cam_target = (loc['x'] + loc['w']/2, loc['y'] + loc['h']/2, loc['w'], loc['h'])
+        
+        # 最初の2秒でズームを完了させ、残りは静止
+        is_static = np.allclose(prev_cam, cam_target, atol=1e-3)
+        move_dur = 0.0 if is_static else min(TRANSITION_DURATION, video_dur)
+        still_dur = video_dur - move_dur
 
-        def make_f(t, s=curr_cam, e=tgt_cam, d=dur):
-            prog = (np.sin((t/d - 0.5) * np.pi) + 1) / 2
-            now = [s_val * (1-prog) + e_val * prog for s_val, e_val in zip(s, e)]
-            w, h = base.size
-            x1, y1 = max(0, int((now[0]-now[2]/2)*w)), max(0, int((now[1]-now[3]/2)*h))
-            x2, y2 = min(w, int(x1+now[2]*w)), min(h, int(y1+now[3]*h))
-            if x2 <= x1: x2 = x1+1
-            if y2 <= y1: y2 = y1+1
-            return np.array(res_pad(base.crop((x1, y1, x2, y2))))
+        scene_clips = []
+        if move_dur > 0:
+            def make_frame(t, s=prev_cam, e=cam_target, d=move_dur):
+                prog = (np.sin((t / d - 0.5) * np.pi) + 1) / 2
+                curr = [sv * (1 - prog) + ev * prog for sv, ev in zip(s, e)]
+                w, h = base_image.size
+                x1, y1 = (curr[0] - curr[2]/2) * w, (curr[1] - curr[3]/2) * h
+                cropped = base_image.crop((int(x1), int(y1), int(x1 + curr[2]*w), int(y1 + curr[3]*h)))
+                return np.array(resize_with_padding(cropped, output_size))
+            scene_clips.append(VideoClip(make_frame, duration=move_dur))
 
-        scene = VideoClip(make_f, duration=dur)
-        if a_path:
-            ac = AudioFileClip(a_path).with_duration(a_dur)
+        if still_dur > 0:
+            w, h = base_image.size
+            x1, y1 = (cam_target[0] - cam_target[2]/2) * w, (cam_target[1] - cam_target[3]/2) * h
+            final_crop = base_image.crop((int(x1), int(y1), int(x1 + cam_target[2]*w), int(y1 + cam_target[3]*h)))
+            scene_clips.append(ImageClip(np.array(resize_with_padding(final_crop, output_size))).with_duration(still_dur))
+
+        scene = concatenate_videoclips(scene_clips) if len(scene_clips) > 1 else scene_clips[0]
+        if audio_path:
+            ac = AudioFileClip(audio_path).with_duration(aud_dur)
             global_clips.append(ac)
             scene = scene.with_audio(ac)
-        
-        subs = []
-        for ts in a_ts:
-            s_c = create_sub(ts['text'], font_p)
-            subs.append(s_c.with_start(ts['offset_seconds']).with_duration(ts['duration_seconds']).with_position(('center', 600)))
-        
-        segments.append(CompositeVideoClip([scene] + subs, size=(OUTPUT_WIDTH, OUTPUT_HEIGHT)) if subs else scene)
-        curr_cam = tgt_cam
-    return concatenate_videoclips(segments, method="compose")
+
+        subtitle_clips = []
+        if timestamps:
+            for ts in timestamps:
+                sub_clip = create_subtitle_clip(ts['text'], font_path, SUBTITLE_FONT_SIZE, int(output_size[0] * 0.85))
+                y_pos = output_size[1] * 0.85 - sub_clip.size[1]
+                positioned = (sub_clip.with_position(('center', y_pos))
+                              .with_start(ts['offset_seconds'])
+                              .with_duration(min(ts['duration_seconds'], video_dur - ts['offset_seconds'])))
+                subtitle_clips.append(positioned)
+
+        video_segments.append(CompositeVideoClip([scene] + subtitle_clips, size=output_size) if subtitle_clips else scene)
+        prev_cam = cam_target
+
+    return concatenate_videoclips(video_segments, method="compose")
