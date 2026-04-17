@@ -35,5 +35,6 @@ tqdm==4.67.1
 typing-inspection==0.4.0
 typing_extensions==4.13.2
 urllib3==2.4.0
-openai-whisper==20240930
+openai-whisper @ git+https://github.com/openai/whisper.git
 python-Levenshtein
+setuptools
