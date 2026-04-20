@@ -13,11 +13,11 @@ OUTPUT_WIDTH = 1280
 OUTPUT_HEIGHT = 720
 OUTPUT_FPS = 24
 SUBTITLE_FONT_SIZE = 42
-# ズーム速度を向上させるための遷移時間（2秒）
+# ズームをより際立たせるため、遷移時間を調整（2秒）
 TRANSITION_DURATION = 2.0
 
 def get_font_path():
-    candidates = ['C:/Windows/Fonts/YuGothM.ttc', 'MS Gothic', 'Arial']
+    candidates = ['C:/Windows/Fonts/YuGothM.ttc', 'C:/Windows/Fonts/msgothic.ttc', 'Arial']
     for p in candidates:
         if os.path.exists(p): return p
     return "Arial"
@@ -56,44 +56,82 @@ def generate_video(image_path, actions, audio_infos, _, image_analysis, global_c
     font_path = get_font_path()
     base_image = Image.open(image_path).convert("RGB")
     video_segments = []
-    prev_cam = (0.5, 0.5, 1.0, 1.0) # cx, cy, w, h
+    
+    # 初期のカメラ位置（全体表示）: (cx, cy, w, h)
+    prev_cam = (0.5, 0.5, 1.0, 1.0)
 
     for i, (audio_info, action_step) in enumerate(zip(audio_infos, actions)):
         audio_path, aud_dur, timestamps = audio_info
-        act = action_step.get('visual_action', {})
-        video_dur = max(aud_dur, act.get('duration', 2))
         
-        loc = act.get('location', {'x':0, 'y':0, 'w':1, 'h':1})
-        cam_target = (loc['x'] + loc['w']/2, loc['y'] + loc['h']/2, loc['w'], loc['h'])
+        # --- 座標データの抽出（柔軟な対応） ---
+        # AIが visual_action をネストし忘れた場合にも対応
+        visual_data = action_step.get('visual_action', action_step)
+        video_dur = max(aud_dur, float(visual_data.get('duration', 2)))
         
-        # 最初の2秒でズームを完了させ、残りは静止
+        loc = visual_data.get('location', {})
+        if not loc or not isinstance(loc, dict):
+            loc = {'x': 0, 'y': 0, 'w': 1, 'h': 1}
+        
+        # 座標を数値に変換（安全策）
+        try:
+            lx = float(loc.get('x', 0))
+            ly = float(loc.get('y', 0))
+            lw = float(loc.get('w', 1))
+            lh = float(loc.get('h', 1))
+            # 異常値（w, hが0など）のチェック
+            if lw <= 0: lw = 1.0
+            if lh <= 0: lh = 1.0
+        except:
+            lx, ly, lw, lh = 0, 0, 1, 1
+
+        cam_target = (lx + lw/2, ly + lh/2, lw, lh)
+        
+        # ズームが必要か判定
         is_static = np.allclose(prev_cam, cam_target, atol=1e-3)
         move_dur = 0.0 if is_static else min(TRANSITION_DURATION, video_dur)
-        still_dur = video_dur - move_dur
+        still_dur = max(0, video_dur - move_dur)
 
         scene_clips = []
+        
+        # 1. ズーム・移動アニメーション
         if move_dur > 0:
             def make_frame(t, s=prev_cam, e=cam_target, d=move_dur):
+                # イージング関数で滑らかに移動
                 prog = (np.sin((t / d - 0.5) * np.pi) + 1) / 2
                 curr = [sv * (1 - prog) + ev * prog for sv, ev in zip(s, e)]
-                w, h = base_image.size
-                x1, y1 = (curr[0] - curr[2]/2) * w, (curr[1] - curr[3]/2) * h
-                cropped = base_image.crop((int(x1), int(y1), int(x1 + curr[2]*w), int(y1 + curr[3]*h)))
+                
+                img_w, img_h = base_image.size
+                # 中心座標からクロップ範囲を計算
+                x1 = max(0, (curr[0] - curr[2]/2) * img_w)
+                y1 = max(0, (curr[1] - curr[3]/2) * img_h)
+                x2 = min(img_w, x1 + curr[2] * img_w)
+                y2 = min(img_h, y1 + curr[3] * img_h)
+                
+                cropped = base_image.crop((int(x1), int(int(y1)), int(x2), int(y2)))
                 return np.array(resize_with_padding(cropped, output_size))
+            
             scene_clips.append(VideoClip(make_frame, duration=move_dur))
 
-        if still_dur > 0:
-            w, h = base_image.size
-            x1, y1 = (cam_target[0] - cam_target[2]/2) * w, (cam_target[1] - cam_target[3]/2) * h
-            final_crop = base_image.crop((int(x1), int(y1), int(x1 + cam_target[2]*w), int(y1 + cam_target[3]*h)))
-            scene_clips.append(ImageClip(np.array(resize_with_padding(final_crop, output_size))).with_duration(still_dur))
+        # 2. 静止（ズーム完了後の保持）
+        if still_dur > 0 or (move_dur == 0):
+            img_w, img_h = base_image.size
+            x1 = max(0, (cam_target[0] - cam_target[2]/2) * img_w)
+            y1 = max(0, (cam_target[1] - cam_target[3]/2) * img_h)
+            x2 = min(img_w, x1 + cam_target[2] * img_w)
+            y2 = min(img_h, y1 + cam_target[3] * img_h)
+            
+            final_crop = base_image.crop((int(x1), int(y1), int(x2), int(y2)))
+            scene_clips.append(ImageClip(np.array(resize_with_padding(final_crop, output_size))).with_duration(max(0.1, still_dur)))
 
+        # クリップの結合
         scene = concatenate_videoclips(scene_clips) if len(scene_clips) > 1 else scene_clips[0]
+        
         if audio_path:
             ac = AudioFileClip(audio_path).with_duration(aud_dur)
             global_clips.append(ac)
             scene = scene.with_audio(ac)
 
+        # 字幕の追加
         subtitle_clips = []
         if timestamps:
             for ts in timestamps:

@@ -28,6 +28,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 load_dotenv()
 
+# Azure設定の読み込み
 AZURE_VISION_ENDPOINT = os.environ["AZURE_VISION_ENDPOINT"]
 AZURE_VISION_KEY = os.environ["AZURE_VISION_KEY"]
 AZURE_OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
@@ -61,49 +62,75 @@ def analyze_image(image_path):
     except: return None
 
 def generate_narration_and_actions(image_path, cube_data_list, is_final_photo=False):
-    client = AzureOpenAI(azure_endpoint=AZURE_OPENAI_ENDPOINT, api_key=AZURE_OPENAI_KEY, api_version=AZURE_OPENAI_API_VERSION)
+    """
+    写真と回想ログに基づき、AIによる構成案(JSON)を生成する
+    """
+    client = AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT, 
+        api_key=AZURE_OPENAI_KEY, 
+        api_version=AZURE_OPENAI_API_VERSION
+    )
     base64_image = encode_image_to_base64(image_path)
 
     if is_final_photo:
         context = "# 最終シーン指示: 物語を締めくくる、感動的で余韻の残る語りで終えてください。"
     else:
-        context = "# 次の画像へのルール: 最後に必ずナレーションのない全景ショットを2秒追加してください（narration: \"\", location: {x:0,y:0,w:1,h:1}, duration: 2）。"
+        context = "# 次の画像へのルール: 最後に必ずナレーションのない全景ショットを2秒追加してください。"
 
-    materials = [f"素材{i}: [面={it.get('face')}] 内容='{it.get('transcript')}' 座標={it.get('location')}" for i, it in enumerate(cube_data_list)]
+    materials = [f"素材{i}: 内容='{it.get('transcript')}' 座標={it.get('location')}" for i, it in enumerate(cube_data_list)]
 
-    prompt = f"""あなたは、ドキュメンタリー映像作家です。
-    提供された「写真」と「回想録」に基づき、一枚の写真から感動的な物語を再構成してください。
+    prompt = f"""あなたは、プロのドキュメンタリー映像作家です。
+提供された「写真」と、それに関する「回想録（素材リスト）」に基づき、1枚の写真から感動的な物語を再構成してください。
 
-    # 目標時間: 約60秒
-    * この写真1枚に対して、合計で約60秒の動画を作成してください。
-    * ナレーションの総文字数は250〜300文字程度が目安です。
-    * 5〜7つのシーンに分け、各シーンのdurationを調整して合計が60秒（トランジション含む）になるようにしてください。
+# 背景
+ユーザーはVR空間で写真が貼られたキューブを回転させながら回想しています。そのため、注視ログ（座標）と発話内容に数秒のタイムラグや不一致が生じることがあります。
 
-    # 登場人物の呼び方に関する厳格なルール
-    * 特定の苗字を勝手に作り出さないでください。
-    * 写真に写っている人物や持ち主を指す際は、画像の内容に合わせて「彼」「彼女」「こちらの方」「皆様」といった代名詞を適切に使用してください。
-    * 親しみやすさと敬意を込めた、穏やかな敬語（三人称）のナレーションを作成してください。
+# 目標
+* 写真1枚に対して、合計で約60秒の構成を作成してください。
+* ナレーションの総文字数は250〜300文字程度が目安です。
+* 5〜7つのシーンに分け、各シーンのduration（秒）を調整してください。
 
-    # ナレーションとズームのルール
-    * **ズームの適正化**: ナレーションの内容が、素材の特定の座標（表情や特定のオブジェクトなど）に具体的に触れている時のみ、その素材の座標へズームしてください。
-    * **迷ったら全体表示**: 感情的な語りや抽象的な思い出を語る際は、無理にズームせず、全体（x:0,y:0,w:1,h:1）を映し続けてください。
-    * 物語の最初は必ず全体像(Front)から始めてください。
+# 演出ルール（重要）
+1. **文脈優先のズーム（Semantic Zoom）**: 
+   - ナレーションで特定の人物や場所に言及している場合、素材リストの当該シーンの座標が(0,0,0,0)であっても、**リスト内の他のシーンから該当する座標を探し出して採用**してください。
+   - もしリスト全体に適切な座標がない場合は、提供された画像の内容を視覚的に解析し、言及されている対象（例：「右下の私」「白い服の友人」）に合わせた最適な座標を自ら推論して設定してください。
+2. **カメラワークのメリハリ**:
+   - ずっと全体を表示するのではなく、特定のディテール（座標へのズーム）と、全体像（x:0, y:0, w:1, h:1）を交互に織り交ぜて視覚的なリズムを作ってください。
+   - 物語の最初と最後は必ず全体像（x:0, y:0, w:1, h:1）にしてください。
+3. **登場人物の呼び方**:
+   - 特定の苗字を勝手に作り出さないでください。
+   - 写真に写っている人物を指す際は、文脈に合わせて「彼」「彼女」「こちらの方」といった三人称代名詞を使用してください。
 
-    # 素材リスト
-    {chr(10).join(materials)}
-    {context}
+# 出力形式
+必ず以下の構造を持つJSON配列のみを出力してください。余計な解説は不要です。
+[
+  {{
+    "narration": "ナレーションのテキスト",
+    "visual_action": {{
+      "duration": 秒数(数値),
+      "location": {{ "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 }}
+    }}
+  }}
+]
 
-    出力はJSON配列形式のみ。
-    """
+# 素材リスト（注視ログと発話内容）
+{chr(10).join(materials)}
+
+{context}
+"""
 
     try:
         response = client.chat.completions.create(
             model=AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=[
-                {"role": "system", "content": "あなたは最高のドキュメンタリー作家です。JSON配列のみを返します。"},
-                {"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}
+                {"role": "system", "content": "あなたは最高のドキュメンタリー作家です。指定されたJSON配列フォーマットのみを厳格に守って出力します。"},
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt}, 
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                ]}
             ]
         )
+        # 不要なマークダウン記法を削除
         content = re.sub(r'```json\s*|\s*```', '', response.choices[0].message.content).strip()
         return json.loads(content)
     except Exception as e:
@@ -111,6 +138,9 @@ def generate_narration_and_actions(image_path, cube_data_list, is_final_photo=Fa
         return None
 
 def synthesize_speech_and_get_timestamps(text, output_filename_base):
+    """
+    Azure Speech SDKを使用して音声合成を行い、簡易的な文単位のタイムスタンプを返す
+    """
     tts_output_filename = f"{output_filename_base}.wav"
     try:
         speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
@@ -118,13 +148,17 @@ def synthesize_speech_and_get_timestamps(text, output_filename_base):
         audio_config = speechsdk.audio.AudioOutputConfig(filename=tts_output_filename)
         synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
         
+        # 文の間に少し溜めを作る
         ssml = f"<speak version='1.0' xml:lang='ja-JP'><voice name='{speech_config.speech_synthesis_voice_name}'><break time='300ms'/>{escape(text)}</voice></speak>"
         result = synthesizer.speak_ssml_async(ssml).get()
         
         actual_dur = 0.0
         if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-            with AudioFileClip(tts_output_filename) as clip: actual_dur = clip.duration
+            if AudioFileClip:
+                with AudioFileClip(tts_output_filename) as clip: 
+                    actual_dur = clip.duration
 
+        # 簡易的なタイムスタンプ分割（。！？で区切る）
         sentence_timestamps = []
         sentences = [s.strip() for s in re.split(r'(?<=[。！？])\s*', text) if s.strip()]
         
